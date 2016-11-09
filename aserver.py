@@ -9,8 +9,22 @@ from concurrent.futures import ThreadPoolExecutor as Pool
 
 pool = Pool(10)
 tasks = deque()
-recv_wait = { }  # Mapping sockets -> tasks (generators)
+recv_wait = { } # Mapping sockets -> tasks (generators)
 send_wait = { }
+future_wait = { }
+
+future_notify, future_event = socketpair()
+
+def future_done(future):
+    tasks.append(future_wait.pop(future))
+    future_notify.send(b'x')
+
+def future_monitor():
+    while True:
+        yield 'recv', future_event
+        future_event.recv(100)
+
+tasks.append(future_monitor())
 
 def run():
     while any([tasks, recv_wait, send_wait]):
@@ -25,12 +39,15 @@ def run():
 
         task = tasks.popleft()
         try:
-            why, what = next(task)  # Run to the yield
+            why, what = next(task) # Run to the yield
             if why == 'recv':
                 # Must go wait somewhere
                 recv_wait[what] = task
             elif why == 'send':
                 send_wait[what] = task
+            elif why == 'future':
+                future_wait[what] = task
+                what.add_done_callback(future_done)
             else:
                 raise RuntimeError('ARG!')
         except StopIteration:
@@ -43,23 +60,24 @@ def fib_server(address):
     sock.listen(5)
     while True:
         yield 'recv', sock
-        client, addr = sock.accept()  # blocking
+        client, addr = sock.accept() # blocking
         print('Connection', addr)
         tasks.append(fib_handler(client))
 
 def fib_handler(client):
     while True:
         yield 'recv', client
-        req = client.recv(100)  # blocking
+        req = client.recv(100) # blocking
         if req.strip() == b'' or not req:
             break
         n = int(req.strip())
         future = pool.submit(fib, n)
-        result = future.result()  # Blocks
+        yield 'future', future
+        result = future.result() # Blocks
         resp = str(result).encode('ascii') + b'\n'
         print(resp)
         yield 'send', client
-        client.send(resp)  # blocking
+        client.send(resp) # blocking
     print('Closed')
 
 tasks.append(fib_server(('', 25000)))
